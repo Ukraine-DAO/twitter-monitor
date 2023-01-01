@@ -95,6 +95,24 @@ func setupFilterRules(ctx context.Context, client *twitter.Client, ids []string)
 	return nil
 }
 
+func updateFilterRules(ctx context.Context, cfg *config.Config, client *twitter.Client) error {
+	idToChannels, err := cfg.TwitterIDToChannels()
+	if err != nil {
+		return fmt.Errorf("failed to map twitter IDs to Discord channels: %w", err)
+	}
+	twIDs := []string{}
+	for id := range idToChannels {
+		twIDs = append(twIDs, id)
+	}
+	sort.Strings(twIDs)
+
+	if err := setupFilterRules(ctx, client, twIDs); err != nil {
+		return fmt.Errorf("failed to set up filter rules: %w", err)
+	}
+
+	return nil
+}
+
 func runStream(cfg *config.Config, discord *discordgo.Session) {
 	ctx := context.Background()
 	creds, err := creds(ctx)
@@ -106,14 +124,9 @@ func runStream(cfg *config.Config, discord *discordgo.Session) {
 	if err != nil {
 		log.Fatalf("Failed to map twitter IDs to Discord channels: %s", err)
 	}
-	twIDs := []string{}
-	for id := range idToChannels {
-		twIDs = append(twIDs, id)
-	}
-	sort.Strings(twIDs)
 
 	searchClient := appTwitterClient(creds.Twitter)
-	if err := setupFilterRules(ctx, searchClient, twIDs); err != nil {
+	if err := updateFilterRules(ctx, cfg, searchClient); err != nil {
 		log.Fatalf("Failed to set up filter rules: %s", err)
 	}
 
@@ -144,10 +157,16 @@ func runStream(cfg *config.Config, discord *discordgo.Session) {
 	log.Printf("Stream started")
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
+	cfgUpdateTicker := time.NewTicker(4 * time.Hour)
+	defer cfgUpdateTicker.Stop()
 
 	for {
 		select {
 		case <-t.C:
+		case <-cfgUpdateTicker.C:
+			if err := updateFilterRules(ctx, cfg, searchClient); err != nil {
+				log.Printf("Failed to update filter rules: %s", err)
+			}
 		case err, ok := <-stream.Err():
 			if !ok {
 				log.Printf("Error stream closed, exiting")
