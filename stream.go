@@ -120,7 +120,17 @@ func runStream(cfg *config.Config, discord *discordgo.Session) {
 	var stream *twitter.TweetStream
 	for {
 		stream, err = searchClient.TweetSearchStream(ctx, twitter.TweetSearchStreamOpts{
-			Expansions: []twitter.Expansion{twitter.ExpansionAuthorID},
+			Expansions: []twitter.Expansion{
+				twitter.ExpansionAuthorID,
+				twitter.ExpansionReferencedTweetsID,
+				twitter.ExpansionReferencedTweetsIDAuthorID,
+			},
+			TweetFields: []twitter.TweetField{
+				twitter.TweetFieldID,
+				twitter.TweetFieldText,
+				twitter.TweetFieldAuthorID,
+				twitter.TweetFieldReferencedTweets,
+			},
 			UserFields: []twitter.UserField{twitter.UserFieldUserName},
 		})
 		if err == nil {
@@ -157,14 +167,7 @@ func runStream(cfg *config.Config, discord *discordgo.Session) {
 			}
 			go func(t *twitter.TweetMessage) {
 				for _, tw := range t.Raw.Tweets {
-					username := "i"
-					for _, u := range t.Raw.Includes.Users {
-						if u.ID == tw.AuthorID {
-							username = u.UserName
-							break
-						}
-					}
-					text := fmt.Sprintf("https://twitter.com/%s/status/%s", username, tw.ID)
+					text := textForTweet(tw, t.Raw.Includes)
 					for _, ch := range idToChannels[tw.AuthorID] {
 						if _, err := discord.ChannelMessageSend(ch, text); err != nil {
 							log.Printf("Failed to post %q to Discord: %s", text, err)
@@ -184,4 +187,27 @@ func runStream(cfg *config.Config, discord *discordgo.Session) {
 			return
 		}
 	}
+}
+
+func textForTweet(tw *twitter.TweetObj, includes *twitter.TweetRawIncludes) string {
+	authorUsername := func(tw *twitter.TweetObj) string {
+		for _, u := range includes.Users {
+			if u.ID == tw.AuthorID {
+				return u.UserName
+			}
+		}
+		return "i"
+	}
+
+	for _, ref := range tw.ReferencedTweets {
+		if ref.Type == "retweeted" {
+			for _, it := range includes.Tweets {
+				if it.ID == ref.ID {
+					return fmt.Sprintf("`@%s` retweeted https://twitter.com/%s/status/%s", authorUsername(tw), authorUsername(it), it.ID)
+				}
+			}
+		}
+	}
+
+	return fmt.Sprintf("https://twitter.com/%s/status/%s", authorUsername(tw), tw.ID)
 }
