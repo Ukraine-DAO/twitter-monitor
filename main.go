@@ -126,10 +126,12 @@ func main() {
 		log.Fatalf("Failed to create Discord client: %s")
 	}
 
-	go runStream(cfg, discord)
+	go func() {
+		log.Printf("Listening on port %s", port)
+		if err := http.ListenAndServe(":"+port, nil); err != nil {
+			log.Fatal(err)
+		}
+	}()
 
-	log.Printf("Listening on port %s", port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
-		log.Fatal(err)
-	}
+	runStream(cfg, discord)
 }
