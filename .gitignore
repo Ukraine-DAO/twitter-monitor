@@ -1,3 +1,2 @@
-.secrets
-datastore-emulator
+.env
 twitter-monitor
