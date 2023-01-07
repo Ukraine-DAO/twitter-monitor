@@ -17,8 +17,13 @@ type Channel struct {
 	Name      string
 	DiscordID string `yaml:"discord_id"`
 
-	RemoteJSON string `yaml:"remote_json"`
+	RemoteJSON RemoteJSON `yaml:"remote_json"`
 	Users      []TwitterUser
+}
+
+type RemoteJSON struct {
+	URL     string `yaml:"url"`
+	Exclude []TwitterUser
 }
 
 type TwitterUser struct {
@@ -49,8 +54,8 @@ func (c *Config) TwitterIDToChannels() (map[string][]string, error) {
 	r := map[string][]string{}
 
 	for _, ch := range c.Channels {
-		if ch.RemoteJSON != "" {
-			resp, err := http.Get(ch.RemoteJSON)
+		if ch.RemoteJSON.URL != "" {
+			resp, err := http.Get(ch.RemoteJSON.URL)
 			if err != nil {
 				return nil, fmt.Errorf("fetching account list %q: %w", ch.RemoteJSON, err)
 			}
@@ -60,8 +65,13 @@ func (c *Config) TwitterIDToChannels() (map[string][]string, error) {
 				return nil, fmt.Errorf("decoding the account list %q: %w", ch.RemoteJSON, err)
 			}
 
+			excluded := map[string]bool{}
+			for _, u := range ch.RemoteJSON.Exclude {
+				excluded[u.ID] = true
+			}
+
 			for _, e := range list.Entries {
-				if e.ID != "" {
+				if e.ID != "" && !excluded[e.ID] {
 					r[e.ID] = append(r[e.ID], ch.DiscordID)
 				}
 			}
