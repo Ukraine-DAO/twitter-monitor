@@ -11,6 +11,8 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 )
 
+replace github.com/g8rswimmer/go-twitter/v2 => github.com/imax9000/go-twitter/v2 v2.0.0-20230123101701-629224daeae5
+
 require (
 	cloud.google.com/go/compute v1.14.0 // indirect
 	cloud.google.com/go/compute/metadata v0.2.3 // indirect

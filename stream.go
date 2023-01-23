@@ -57,10 +57,13 @@ func appTwitterClient(creds TwitterCredentials) *twitter.Client {
 	}
 }
 
-func setupFilterRules(ctx context.Context, client *twitter.Client, ids []string) error {
+func setupFilterRules(ctx context.Context, client *twitter.Client, ids []string, extra []twitter.TweetSearchStreamRule) error {
 	cfgRules := filterRulesFromIDs(ids)
-	ruleMap := map[string]bool{}
+	ruleMap := map[twitter.TweetSearchStreamRule]bool{}
 	for _, r := range cfgRules {
+		ruleMap[twitter.TweetSearchStreamRule{Value: r}] = true
+	}
+	for _, r := range extra {
 		ruleMap[r] = true
 	}
 
@@ -70,11 +73,11 @@ func setupFilterRules(ctx context.Context, client *twitter.Client, ids []string)
 	}
 	toDelete := []twitter.TweetSearchStreamRuleID{}
 	for _, rule := range rules.Rules {
-		if !ruleMap[rule.Value] {
+		if !ruleMap[rule.TweetSearchStreamRule] {
 			toDelete = append(toDelete, rule.ID)
 			continue
 		}
-		delete(ruleMap, rule.Value)
+		delete(ruleMap, rule.TweetSearchStreamRule)
 	}
 	if len(toDelete) > 0 {
 		_, err := client.TweetSearchStreamDeleteRuleByID(ctx, toDelete, false)
@@ -85,7 +88,7 @@ func setupFilterRules(ctx context.Context, client *twitter.Client, ids []string)
 	if len(ruleMap) > 0 {
 		req := []twitter.TweetSearchStreamRule{}
 		for r := range ruleMap {
-			req = append(req, twitter.TweetSearchStreamRule{Value: r})
+			req = append(req, r)
 		}
 		_, err := client.TweetSearchStreamAddRule(ctx, req, false)
 		if err != nil {
@@ -106,7 +109,14 @@ func updateFilterRules(ctx context.Context, cfg *config.Config, client *twitter.
 	}
 	sort.Strings(twIDs)
 
-	if err := setupFilterRules(ctx, client, twIDs); err != nil {
+	taggedRules := []twitter.TweetSearchStreamRule{}
+	for _, ch := range cfg.Channels {
+		if ch.SearchQuery != "" {
+			taggedRules = append(taggedRules, twitter.TweetSearchStreamRule{Value: ch.SearchQuery, Tag: ch.DiscordID})
+		}
+	}
+
+	if err := setupFilterRules(ctx, client, twIDs, taggedRules); err != nil {
 		return fmt.Errorf("failed to set up filter rules: %w", err)
 	}
 
@@ -114,7 +124,8 @@ func updateFilterRules(ctx context.Context, cfg *config.Config, client *twitter.
 }
 
 func runStream(cfg *config.Config, discord *discordgo.Session) {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	creds, err := creds(ctx)
 	if err != nil {
 		log.Fatalf("Failed to get credentials: %s", err)
@@ -130,9 +141,22 @@ func runStream(cfg *config.Config, discord *discordgo.Session) {
 		log.Fatalf("Failed to set up filter rules: %s", err)
 	}
 
-	var stream *twitter.TweetStream
+	cfgUpdateTicker := time.NewTicker(4 * time.Hour)
+	defer cfgUpdateTicker.Stop()
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-cfgUpdateTicker.C:
+			if err := updateFilterRules(ctx, cfg, searchClient); err != nil {
+				log.Printf("Failed to update filter rules: %s", err)
+			}
+		}
+	}()
+
 	for {
-		stream, err = searchClient.TweetSearchStream(ctx, twitter.TweetSearchStreamOpts{
+		stream, err := searchClient.TweetSearchStreamV2(ctx, twitter.TweetSearchStreamOpts{
 			Expansions: []twitter.Expansion{
 				twitter.ExpansionAuthorID,
 				twitter.ExpansionReferencedTweetsID,
@@ -146,64 +170,48 @@ func runStream(cfg *config.Config, discord *discordgo.Session) {
 			},
 			UserFields: []twitter.UserField{twitter.UserFieldUserName},
 		})
-		if err == nil {
-			break
+		if err != nil {
+			log.Printf("Failed to start stream: %s", err)
+			time.Sleep(30 * time.Second)
+			continue
 		}
-		log.Printf("Failed to start stream: %s", err)
-		time.Sleep(30 * time.Second)
-	}
-	defer stream.Close()
+		log.Printf("Stream started")
 
-	log.Printf("Stream started")
-	t := time.NewTicker(5 * time.Second)
-	defer t.Stop()
-	cfgUpdateTicker := time.NewTicker(4 * time.Hour)
-	defer cfgUpdateTicker.Stop()
-
-	for {
-		select {
-		case <-t.C:
-		case <-cfgUpdateTicker.C:
-			if err := updateFilterRules(ctx, cfg, searchClient); err != nil {
-				log.Printf("Failed to update filter rules: %s", err)
-			}
-		case err, ok := <-stream.Err():
-			if !ok {
-				log.Printf("Error stream closed, exiting")
-				return
-			}
-			log.Printf("Stream error: %s", err)
-		case err, ok := <-stream.DisconnectionError():
-			if !ok {
-				log.Printf("Disconnection error stream closed, exiting")
-				return
-			}
-			log.Printf("Disconnection error: %s", err)
-		case tweets, ok := <-stream.Tweets():
-			if !ok {
-				log.Printf("Main stream closed, exiting")
-				return
-			}
-			go func(t *twitter.TweetMessage) {
-				for _, tw := range t.Raw.Tweets {
-					text := textForTweet(tw, t.Raw.Includes)
-					for _, ch := range idToChannels[tw.AuthorID] {
+		err = stream.Run(ctx, twitter.TweetStreamV2Options{
+			OnTweet: func(t *twitter.StreamedTweet) {
+				go func(t *twitter.StreamedTweet) {
+					text := textForTweet(t.Tweet, t.Includes)
+					for _, ch := range idToChannels[t.Tweet.AuthorID] {
 						if _, err := discord.ChannelMessageSend(ch, text); err != nil {
 							log.Printf("Failed to post %q to Discord: %s", text, err)
 						}
 					}
-				}
-			}(tweets)
-		case msg, ok := <-stream.SystemMessages():
-			if !ok {
-				log.Printf("System message stream closed, exiting")
-				return
-			}
-			log.Printf("System messages: %#v", msg)
-		}
-		if !stream.Connection() {
-			log.Printf("Stream closed for unknown reason, exiting")
+
+					for _, rule := range t.MatchingRules {
+						if rule.Tag == "" {
+							continue
+						}
+						if _, err := discord.ChannelMessageSend(rule.Tag, text); err != nil {
+							log.Printf("Failed to post %q to Discord: %s", text, err)
+						}
+					}
+				}(t)
+			},
+			OnSystemMessage: func(kind twitter.SystemMessageType, msg *twitter.SystemMessage) {
+				log.Printf("System message: [%s] %#v", kind, msg)
+			},
+			OnTransientError: func(err error) {
+				log.Printf("Transient stream error: %s", err)
+			},
+		})
+
+		if ctx.Err() != nil {
+			log.Printf("Context done, exiting")
 			return
+		}
+
+		if err != nil {
+			log.Printf("Stream has closed with an error: %s", err)
 		}
 	}
 }

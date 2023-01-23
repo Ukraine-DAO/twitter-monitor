@@ -17,8 +17,9 @@ type Channel struct {
 	Name      string
 	DiscordID string `yaml:"discord_id"`
 
-	RemoteJSON RemoteJSON `yaml:"remote_json"`
-	Users      []TwitterUser
+	RemoteJSON  RemoteJSON `yaml:"remote_json"`
+	Users       []TwitterUser
+	SearchQuery string `yaml:"search_query"`
 }
 
 type RemoteJSON struct {
